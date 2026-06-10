@@ -2,6 +2,17 @@
 
 Post-install setup notes for Fedora Workstation (44+). Run through them top to bottom on a fresh install.
 
+## Get the files
+
+Clone the repo and `cd` into it (install `git` first if a fresh system doesn't have it):
+
+```bash
+sudo dnf install -y git
+git clone https://github.com/ronaldokwan/dotfiles.git
+cd dotfiles
+./setup.sh
+```
+
 ## Automated setup
 
 Most of this guide is scripted in [`setup.sh`](setup.sh). Run it with no arguments for an interactive picker — choose which steps to run, watch per-step progress, and get a summary of follow-up actions at the end. It's idempotent: safe to re-run; each step skips work already done. The NVIDIA step detects your GPU and only installs the driver on NVIDIA hardware.
@@ -18,14 +29,7 @@ Run it as your normal user — **not** with `sudo`. The script calls `sudo` itse
 
 ### Running it
 
-Make it executable once, then run it:
-
-```bash
-chmod +x setup.sh
-./setup.sh
-```
-
-You'll get a numbered menu. **Press Enter to run everything**, or type a subset like `1 4 9` and press Enter to run only those steps. Then confirm with `y`:
+Running `./setup.sh` (as shown above) gives you a numbered menu. **Press Enter to run everything**, or type a subset like `1 4 9` and press Enter to run only those steps. Then confirm with `y`:
 
 ```console
   ┌────────────────────────────────────────┐
