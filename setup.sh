@@ -4,10 +4,13 @@
 # Idempotent: safe to run multiple times — each step skips work already done.
 #
 # Usage:
-#   ./setup.sh            # interactive picker (runs all steps if non-interactive)
-#   ./setup.sh --yes      # no prompts; run all steps
+#   ./setup.sh                 # interactive picker (runs all steps if non-interactive)
+#   ./setup.sh --yes           # no prompts; run all steps
+#   ./setup.sh vscode chrome   # run only the named steps
+#   ./setup.sh --dry-run       # print every change without making it
 #   ./setup.sh --help
 #
+# Steps run independently: one failing step is reported and the rest continue.
 # The NVIDIA step auto-detects the GPU: it installs the driver only on NVIDIA
 # hardware and skips itself otherwise.
 #
@@ -38,9 +41,13 @@ rule() {
 }
 
 center() {  # text width — pad text to width, centered
-  local text="$1" width="$2" len pad
+  local text="$1" width="$2" len pad rpad
   len=${#text}; pad=$(( (width - len) / 2 ))
-  printf '%*s%s%*s' "$pad" '' "$text" "$(( width - len - pad ))" ''
+  # Clamp: if text is wider than the box, a negative field width would make
+  # printf left-justify and break the border alignment.
+  [ "$pad" -lt 0 ] && pad=0
+  rpad=$(( width - len - pad )); [ "$rpad" -lt 0 ] && rpad=0
+  printf '%*s%s%*s' "$pad" '' "$text" "$rpad" ''
 }
 
 banner() {
@@ -57,9 +64,34 @@ step_header() {  # idx total label
     "$C_BOLD" "$C_BLUE" "$1" "$2" "$C_RESET" "$C_BOLD" "$3" "$C_RESET"
 }
 
-# Deferred action items, shown in the final summary.
-NOTES=()
-add_note() { NOTES+=("$1"); }
+# Per-run scratch dir for state that must survive step subshells (see
+# run_selected): deferred notes and reboot reasons are appended to files here
+# because steps run in subshells and can't write back to parent arrays.
+STATE_DIR=""
+
+# Deferred action items and reboot reasons, shown in the final summary.
+add_note()    { [ -n "$STATE_DIR" ] && printf '%s\n' "$1" >> "$STATE_DIR/notes"; }
+mark_reboot() { [ -n "$STATE_DIR" ] && printf '%s\n' "$1" >> "$STATE_DIR/reboot"; }
+
+# Fail with a clear message if a required external command is missing.
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || { err "missing required command: $1"; return 1; }
+}
+
+# Dry-run: when set, mutating commands are printed instead of executed.
+# Read-only probes (rpm -q, lspci, command -v, ...) still run so control flow
+# is realistic. Default off; enabled by --dry-run.
+DRY_RUN=0
+
+# Run a command, or just print it when in dry-run mode. Use this only for
+# state-changing commands — never for the detection probes that decide flow.
+run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '%s  [dry-run]%s %s\n' "$C_YELLOW" "$C_RESET" "$*"
+  else
+    "$@"
+  fi
+}
 
 # A yes/no prompt. Returns success on y/Y. Non-interactive defaults to the arg ($2: 0/1).
 ask() {
@@ -76,10 +108,12 @@ ask() {
 
 ensure_line() {  # line file — append only if not already present
   local line="$1" file="$2"
-  touch "$file"
-  if grep -qxF -- "$line" "$file"; then
+  if [ -e "$file" ] && grep -qxF -- "$line" "$file"; then
     skip "already in ${file/#$HOME/\~}: $line"
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    printf '%s  [dry-run]%s append to %s: %s\n' "$C_YELLOW" "$C_RESET" "${file/#$HOME/\~}" "$line"
   else
+    touch "$file"
     printf '%s\n' "$line" >> "$file"
     ok "added to ${file/#$HOME/\~}: $line"
   fi
@@ -94,7 +128,7 @@ ensure_rpmfusion() {
     return
   fi
   info "enabling RPM Fusion (free + nonfree)"
-  sudo dnf install -y \
+  run sudo dnf install -y \
     "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${fed}.noarch.rpm" \
     "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${fed}.noarch.rpm"
 }
@@ -106,14 +140,14 @@ dnf_install() {
   done
   if [ ${#missing[@]} -gt 0 ]; then
     info "installing: ${missing[*]}"
-    sudo dnf install -y "${missing[@]}"
+    run sudo dnf install -y "${missing[@]}"
   fi
 }
 
 # ---- steps -----------------------------------------------------------------
 
 step_system_update() {
-  sudo dnf upgrade --refresh -y
+  run sudo dnf upgrade --refresh -y
   add_note "If the kernel was updated, reboot before NVIDIA or other kernel-module steps."
 }
 
@@ -123,6 +157,8 @@ step_dnf_speedup() {
     local key="${kv%%=*}"
     if sudo grep -q "^${key}=" "$conf"; then
       skip "$key already set in $conf"
+    elif [ "$DRY_RUN" -eq 1 ]; then
+      printf '%s  [dry-run]%s append to %s: %s\n' "$C_YELLOW" "$C_RESET" "$conf" "$kv"
     else
       echo "$kv" | sudo tee -a "$conf" >/dev/null
       ok "added to $conf: $kv"
@@ -133,8 +169,8 @@ step_dnf_speedup() {
 step_vscode() {
   if [ ! -f /etc/yum.repos.d/vscode.repo ]; then
     info "importing Microsoft repo"
-    sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
-    sudo sh -c 'echo -e "[code]\nname=Visual Studio Code\nbaseurl=https://packages.microsoft.com/yumrepos/vscode\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc" > /etc/yum.repos.d/vscode.repo'
+    run sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+    run sudo sh -c 'printf "%s\n" "[code]" "name=Visual Studio Code" "baseurl=https://packages.microsoft.com/yumrepos/vscode" "enabled=1" "gpgcheck=1" "gpgkey=https://packages.microsoft.com/keys/microsoft.asc" > /etc/yum.repos.d/vscode.repo'
   else
     skip "vscode.repo already present"
   fi
@@ -150,7 +186,7 @@ step_chrome() {
     # then drops its own repo file for future updates. Avoids needing the
     # config-manager dnf plugin, which isn't always present on DNF 5.
     info "installing google-chrome-stable"
-    sudo dnf install -y --enablerepo=google-chrome google-chrome-stable
+    run sudo dnf install -y --enablerepo=google-chrome google-chrome-stable
   fi
 }
 
@@ -174,7 +210,7 @@ step_zsh() {
     # authenticates the calling user through PAM, which blocks an unattended
     # (--yes) run. Going through sudo reuses the credentials cached in main().
     info "setting zsh as default shell"
-    if sudo chsh -s "$zsh_path" "$USER"; then
+    if run sudo chsh -s "$zsh_path" "$USER"; then
       add_note "Log out and back in for zsh to become your default shell."
     else
       warn "chsh failed — set it manually with: sudo chsh -s $zsh_path $USER"
@@ -190,12 +226,60 @@ step_zsh() {
   ensure_line 'alias update="sudo dnf upgrade --refresh"' "$zshrc"
 }
 
+# Pinned starship release + per-arch SHA-256 of the release tarball. Verifying a
+# known hash is why we download the binary directly instead of piping the
+# upstream install script into a shell. To bump: pick a new version below and
+# update BOTH hashes from the release's *.tar.gz.sha256 sidecars at
+# https://github.com/starship/starship/releases
+STARSHIP_VERSION="v1.25.1"
+declare -A STARSHIP_TARGET=( [x86_64]="x86_64-unknown-linux-gnu" [aarch64]="aarch64-unknown-linux-musl" )
+declare -A STARSHIP_SHA256=(
+  [x86_64]="4488c11ca632327d1f1f16fb2f102c0646094c35479cd5435991385da43c61ac"
+  [aarch64]="01517aab398959ea9ea73bdb4f032ea4dbb51dff5c8e5eb05b4a1b9b7ab872b8"
+)
+
+# Download the pinned starship tarball, verify its SHA-256, and install the
+# binary to /usr/local/bin. Fails closed on download error or hash mismatch.
+install_starship() {
+  local arch target sha url tmp
+  arch="$(uname -m)"
+  target="${STARSHIP_TARGET[$arch]:-}"; sha="${STARSHIP_SHA256[$arch]:-}"
+  if [ -z "$target" ] || [ -z "$sha" ]; then
+    err "no pinned starship build for arch '$arch' — install it manually and re-run"
+    return 1
+  fi
+  url="https://github.com/starship/starship/releases/download/${STARSHIP_VERSION}/starship-${target}.tar.gz"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    run "curl -fsSL $url | verify sha256 $sha | sudo install -m755 starship /usr/local/bin"
+    return 0
+  fi
+
+  tmp="$(mktemp -d)"
+  info "downloading starship ${STARSHIP_VERSION} (${target})"
+  if ! curl -fsSL --connect-timeout 10 --max-time 120 "$url" -o "$tmp/starship.tar.gz"; then
+    err "failed to download starship"; rm -rf "$tmp"; return 1
+  fi
+  if ! printf '%s  %s\n' "$sha" "$tmp/starship.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+    err "starship checksum mismatch — refusing to install (expected $sha)"; rm -rf "$tmp"; return 1
+  fi
+  ok "checksum verified"
+  tar -xzf "$tmp/starship.tar.gz" -C "$tmp" starship
+  sudo install -m755 "$tmp/starship" /usr/local/bin/starship
+  rm -rf "$tmp"
+  ok "starship installed to /usr/local/bin"
+}
+
 step_zsh_plugins() {
+  require_cmd git || return 1        # plugins are git clones
+  require_cmd curl || return 1       # starship download
+  require_cmd sha256sum || return 1  # starship verification
+
   clone_if_missing() {
     local url="$1" dir="$2"
     if [ -d "$dir" ]; then skip "${dir/#$HOME/\~} already cloned"; else
       info "cloning $url"
-      git clone --depth 1 "$url" "$dir"
+      run git clone --depth 1 "$url" "$dir"
     fi
   }
   clone_if_missing https://github.com/zsh-users/zsh-autosuggestions      "$HOME/.zsh/zsh-autosuggestions"
@@ -204,22 +288,7 @@ step_zsh_plugins() {
   if command -v starship >/dev/null 2>&1; then
     skip "starship already installed"
   else
-    # NOTE: this pipes the upstream installer straight into a shell. HTTPS
-    # protects the transport, but there is no checksum/signature check — you
-    # are trusting starship.rs and its CDN. This is the project's documented
-    # install method (same model as Homebrew / Oh My Zsh). To harden it, pin a
-    # release and verify its SHA-256 before running.
-    info "installing starship"
-    # Download the whole installer before running it: -f makes curl fail on an
-    # HTTP error (otherwise a 5xx error page would pipe into sh with exit 0),
-    # and capturing first means a truncated/interrupted download never reaches
-    # the shell half-executed.
-    local installer
-    if installer="$(curl -fsSL --connect-timeout 10 --max-time 60 https://starship.rs/install.sh)"; then
-      printf '%s' "$installer" | sh -s -- --yes
-    else
-      err "failed to download starship installer"; return 1
-    fi
+    install_starship
   fi
 
   # Wire up ~/.zshrc — order matters: autosuggestions, then highlighting, then starship.
@@ -229,6 +298,7 @@ step_zsh_plugins() {
   ensure_line '# Syntax highlighting (must come after autosuggestions)'           "$zshrc"
   ensure_line 'source ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh' "$zshrc"
   ensure_line '# Starship prompt (always last)'                                   "$zshrc"
+  # shellcheck disable=SC2016  # intentional: write the literal line, don't expand it now
   ensure_line 'eval "$(starship init zsh)"'                                       "$zshrc"
   add_note "Restart your shell or run 'source ~/.zshrc' to load the plugins."
 }
@@ -244,7 +314,7 @@ step_nvidia() {
   fi
 
   warn "The driver must match your running kernel. Updating first..."
-  sudo dnf upgrade --refresh -y
+  run sudo dnf upgrade --refresh -y
 
   ensure_rpmfusion
   dnf_install akmod-nvidia
@@ -260,20 +330,27 @@ step_nvidia() {
 
   warn "akmod is building the kernel module in the background (~5 min)."
   add_note "NVIDIA: wait for the module to build ('modinfo -F version nvidia' prints a version), then reboot and check 'nvidia-smi'."
+  mark_reboot "NVIDIA driver installed — reboot once the kernel module finishes building."
 }
 
 step_codecs() {
   # Fedora ships without patent-encumbered codecs — needed for video playback
   # and hardware decode. Lives in RPM Fusion.
   ensure_rpmfusion
+  info "installing multimedia group"
+  run sudo dnf group install -y multimedia
+
+  # Swap the patent-stripped ffmpeg-free for the full RPM Fusion ffmpeg. Done
+  # AFTER the group install, since that group can pull ffmpeg-free back in —
+  # swapping first would leave the crippled build on a fresh system.
   if pkg_installed ffmpeg-free; then
     info "swapping in full ffmpeg"
-    sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing
+    run sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing
+  elif pkg_installed ffmpeg; then
+    skip "full ffmpeg already in place"
   else
-    skip "ffmpeg-free not present — full ffmpeg already in place"
+    warn "neither ffmpeg nor ffmpeg-free present after group install"
   fi
-  info "installing multimedia group"
-  sudo dnf group install -y multimedia
 
   # Hardware video decode, per GPU vendor.
   local gpus; gpus="$(lspci | grep -Ei 'vga|3d|display' || true)"
@@ -285,13 +362,13 @@ step_codecs() {
     # the RPM Fusion "freeworld" builds re-enable them.
     if pkg_installed mesa-va-drivers; then
       info "swapping in mesa-va freeworld driver (AMD hardware decode)"
-      sudo dnf swap -y mesa-va-drivers mesa-va-drivers-freeworld
+      run sudo dnf swap -y mesa-va-drivers mesa-va-drivers-freeworld
     else
       skip "mesa-va-drivers already freeworld"
     fi
     if pkg_installed mesa-vdpau-drivers; then
       info "swapping in mesa-vdpau freeworld driver"
-      sudo dnf swap -y mesa-vdpau-drivers mesa-vdpau-drivers-freeworld
+      run sudo dnf swap -y mesa-vdpau-drivers mesa-vdpau-drivers-freeworld
     else
       skip "mesa-vdpau-drivers already freeworld"
     fi
@@ -309,7 +386,12 @@ step_firmware() {
   local rc
 
   info "refreshing firmware metadata from LVFS"
-  rc=0; sudo fwupdmgr refresh --force || rc=$?
+  rc=0
+  if [ "$DRY_RUN" -eq 1 ]; then
+    run sudo fwupdmgr refresh --force
+  else
+    sudo fwupdmgr refresh --force || rc=$?
+  fi
   case "$rc" in
     0) ok "metadata refreshed" ;;
     2) skip "metadata already up to date" ;;
@@ -317,14 +399,18 @@ step_firmware() {
   esac
 
   info "applying firmware updates (if any)"
-  rc=0; sudo fwupdmgr update -y || rc=$?
+  rc=0
+  if [ "$DRY_RUN" -eq 1 ]; then
+    run sudo fwupdmgr update -y
+  else
+    sudo fwupdmgr update -y || rc=$?
+  fi
   case "$rc" in
-    0) ok "firmware updates applied" ;;
+    0) ok "firmware updates applied"
+       mark_reboot "Firmware updates were staged — reboot to let fwupd apply them." ;;
     2) skip "no firmware updates to apply" ;;
     *) err "fwupdmgr update failed (exit $rc)"; return "$rc" ;;
   esac
-
-  add_note "Some firmware updates only take effect after a reboot — fwupd will say if so."
 }
 
 step_gnome_tweaks() {
@@ -336,6 +422,10 @@ step_gnome_tweaks() {
     return
   fi
   gset() {  # schema key value
+    if [ "$DRY_RUN" -eq 1 ]; then
+      printf '%s  [dry-run]%s gsettings set %s %s %s\n' "$C_YELLOW" "$C_RESET" "$1" "$2" "$3"
+      return
+    fi
     local err
     if err="$(gsettings set "$1" "$2" "$3" 2>&1)"; then
       ok "$2 → $3"
@@ -357,10 +447,10 @@ step_flathub() {
     skip "Flathub remote already present"
   else
     info "adding Flathub remote"
-    sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    run sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
   fi
   # Fedora ships Flathub filtered to a subset — drop the filter for full access.
-  sudo flatpak remote-modify --no-filter --enable flathub || true
+  run sudo flatpak remote-modify --no-filter --enable flathub
   add_note "Flathub enabled — install apps via GNOME Software or 'flatpak install flathub <app-id>'."
 }
 
@@ -384,7 +474,7 @@ key_to_index() {
 
 # Drop duplicate indices from SELECTED, preserving first-seen order.
 dedup_selected() {
-  local seen=() out=() i
+  local -A seen; local out=() i
   for i in "${SELECTED[@]}"; do
     if [ -z "${seen[$i]:-}" ]; then seen[$i]=1; out+=("$i"); fi
   done
@@ -441,7 +531,10 @@ confirm_selection() {
 
 CURRENT_STEP=''
 DONE_LABELS=()
+FAILED_STEPS=()
 
+# Fires only for failures outside a step (startup, picker, sudo bootstrap) —
+# inside run_selected the ERR trap is cleared and per-step failure is handled.
 on_error() {
   local rc=$?
   printf '\n%s%s✗ Failed%s during: %s%s%s  (exit %d)\n' \
@@ -449,26 +542,59 @@ on_error() {
   echo "  Fix the issue and re-run ./setup.sh — completed steps will be skipped."
 }
 
-cleanup() { [ -n "${SUDO_PID:-}" ] && kill "$SUDO_PID" 2>/dev/null || true; }
+cleanup() {
+  [ -n "${SUDO_PID:-}" ] && kill "$SUDO_PID" 2>/dev/null
+  [ -n "$STATE_DIR" ] && rm -rf "$STATE_DIR"
+  return 0
+}
 
 run_selected() {
-  local total=${#SELECTED[@]} n=0 i
+  local total=${#SELECTED[@]} n=0 i rc
+  # Handle per-step failure here instead of letting on_error abort the run.
+  # The ERR trap fires independently of set -e, so it must be cleared for the
+  # loop and restored afterwards.
+  trap - ERR
   for i in "${SELECTED[@]}"; do
     n=$((n + 1))
     CURRENT_STEP="${STEP_LABELS[$i]}"
     step_header "$n" "$total" "$CURRENT_STEP"
-    "${STEP_FUNCS[$i]}"
-    DONE_LABELS+=("$CURRENT_STEP")
+    # Run each step in an isolated subshell so one failure doesn't abort the
+    # rest. set -e inside keeps the step atomic; set +e outside lets the parent
+    # capture the exit code and move on. add_note / mark_reboot write to files
+    # precisely because this subshell can't mutate parent arrays.
+    rc=0
+    set +e
+    ( set -e; "${STEP_FUNCS[$i]}" )
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      DONE_LABELS+=("$CURRENT_STEP")
+    else
+      FAILED_STEPS+=("$CURRENT_STEP")
+      err "step '$CURRENT_STEP' failed (exit $rc) — continuing with remaining steps"
+    fi
   done
+  trap on_error ERR
 }
 
 print_summary() {
   echo; rule
-  printf '%s%s✓ Done%s — %d step(s) in %ds\n' "$C_BOLD" "$C_GREEN" "$C_RESET" "${#DONE_LABELS[@]}" "$SECONDS"
-  local l; for l in "${DONE_LABELS[@]}"; do printf '   %s✓%s %s\n' "$C_GREEN" "$C_RESET" "$l"; done
-  if [ ${#NOTES[@]} -gt 0 ]; then
+  printf '%s%s✓ Done%s — %d ok, %d failed, in %ds\n' \
+    "$C_BOLD" "$C_GREEN" "$C_RESET" "${#DONE_LABELS[@]}" "${#FAILED_STEPS[@]}" "$SECONDS"
+  local l
+  for l in "${DONE_LABELS[@]}";  do printf '   %s✓%s %s\n' "$C_GREEN" "$C_RESET" "$l"; done
+  for l in "${FAILED_STEPS[@]}"; do printf '   %s✗%s %s\n' "$C_RED"   "$C_RESET" "$l"; done
+
+  if [ -s "$STATE_DIR/reboot" ]; then
+    printf '\n%s%s⚠ Reboot recommended:%s\n' "$C_BOLD" "$C_YELLOW" "$C_RESET"
+    while IFS= read -r r; do printf '   %s•%s %s\n' "$C_YELLOW" "$C_RESET" "$r"; done < "$STATE_DIR/reboot"
+  fi
+  if [ -s "$STATE_DIR/notes" ]; then
     printf '\n%sNext steps:%s\n' "$C_BOLD" "$C_RESET"
-    local nt; for nt in "${NOTES[@]}"; do printf '   %s•%s %s\n' "$C_YELLOW" "$C_RESET" "$nt"; done
+    while IFS= read -r nt; do printf '   %s•%s %s\n' "$C_YELLOW" "$C_RESET" "$nt"; done < "$STATE_DIR/notes"
+  fi
+  if [ ${#FAILED_STEPS[@]} -gt 0 ]; then
+    printf '\n%sRe-run ./setup.sh to retry the failed step(s) — anything done is skipped.%s\n' "$C_DIM" "$C_RESET"
   fi
 }
 
@@ -482,6 +608,7 @@ Usage:
   ./setup.sh                 Interactive picker (runs all steps if non-interactive)
   ./setup.sh --yes           Skip all prompts; run all steps
   ./setup.sh vscode chrome   Run only the named steps
+  ./setup.sh --dry-run       Print every change without making it
   ./setup.sh --help          Show this help
 
 Steps: update, dnf, firmware, vscode, chrome, gnome, gnome-tweaks, zsh,
@@ -500,14 +627,22 @@ main() {
     exit 1
   fi
 
+  # The step registry is three parallel arrays — a missed entry would run the
+  # wrong function under the wrong label. Fail loudly if they ever drift.
+  if [ "${#STEP_KEYS[@]}" -ne "${#STEP_LABELS[@]}" ] || [ "${#STEP_LABELS[@]}" -ne "${#STEP_FUNCS[@]}" ]; then
+    err "step registry arrays are out of sync (keys=${#STEP_KEYS[@]} labels=${#STEP_LABELS[@]} funcs=${#STEP_FUNCS[@]})"
+    exit 1
+  fi
+
   INTERACTIVE=1; [ -t 0 ] || INTERACTIVE=0
   ASSUME_YES=0
 
   local cli_steps=()
   for arg in "$@"; do
     case "$arg" in
-      -y|--yes)  ASSUME_YES=1 ;;
-      -h|--help) usage; exit 0 ;;
+      -y|--yes)     ASSUME_YES=1 ;;
+      -n|--dry-run) DRY_RUN=1 ;;
+      -h|--help)    usage; exit 0 ;;
       -*) err "unknown option: $arg"; usage; exit 1 ;;
       *) cli_steps+=("$arg") ;;
     esac
@@ -546,16 +681,25 @@ main() {
 
   confirm_selection
 
-  info "Caching sudo credentials (keeps them alive for the whole run)..."
-  sudo -v
-  # Background keep-alive so long installs don't stall on a sudo prompt.
-  # Guard sudo -n true: on failure (expired creds, PAM policy) warn and stop
-  # rather than letting the inherited set -e silently kill the loop.
-  ( while kill -0 "$$" 2>/dev/null; do
-      sudo -n true 2>/dev/null || { warn "sudo keep-alive failed — you may be prompted again"; break; }
-      sleep 50
-    done ) &
-  SUDO_PID=$!
+  # Dry-run needs no privileges — skip the sudo prompt and keep-alive entirely.
+  if [ "$DRY_RUN" -eq 1 ]; then
+    warn "DRY RUN — printing changes only; nothing will be installed or modified."
+  else
+    info "Caching sudo credentials (keeps them alive for the whole run)..."
+    sudo -v
+    # Background keep-alive so long installs don't stall on a sudo prompt.
+    # Guard sudo -n true: on failure (expired creds, PAM policy) warn and stop
+    # rather than letting the inherited set -e silently kill the loop.
+    ( while kill -0 "$$" 2>/dev/null; do
+        sudo -n true 2>/dev/null || { warn "sudo keep-alive failed — you may be prompted again"; break; }
+        sleep 50
+      done ) &
+    SUDO_PID=$!
+  fi
+
+  # Scratch dir for notes / reboot reasons emitted from step subshells; removed
+  # by cleanup() on exit.
+  STATE_DIR="$(mktemp -d)"
 
   run_selected
   print_summary

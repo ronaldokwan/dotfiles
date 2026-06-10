@@ -7,10 +7,14 @@ Post-install setup notes for Fedora Workstation (44+). Run through them top to b
 Most of this guide is scripted in [`setup.sh`](setup.sh). Run it with no arguments for an interactive picker — choose which steps to run, watch per-step progress, and get a summary of follow-up actions at the end. It's idempotent: safe to re-run; each step skips work already done. The NVIDIA step detects your GPU and only installs the driver on NVIDIA hardware.
 
 ```bash
-./setup.sh            # interactive picker (all steps by default)
-./setup.sh --yes      # no prompts; run all steps
+./setup.sh                 # interactive picker (all steps by default)
+./setup.sh --yes           # no prompts; run all steps
+./setup.sh vscode chrome   # run only the named steps
+./setup.sh --dry-run       # print every change without making it
 ./setup.sh --help
 ```
+
+Run it as your normal user — **not** with `sudo`. The script calls `sudo` itself only for the steps that need root, so the per-user changes (your `~/.zshrc`, shell, GNOME settings) land in your account rather than root's. Available step names: `update`, `dnf`, `firmware`, `vscode`, `chrome`, `gnome`, `gnome-tweaks`, `zsh`, `plugins`, `flathub`, `codecs`, `steam`, `nvidia`.
 
 ### Running it
 
@@ -57,7 +61,11 @@ Proceed? [y/N] y                                           ← type y, then Ente
 - **`⏎`** means press <kbd>Enter</kbd>. Pressing it on an empty line selects every step.
 - You're asked for your password once (for `sudo`); it's cached for the whole run.
 - Each step prints `[n/13]` progress, and a summary with any follow-up actions appears at the end.
+- **One failing step doesn't stop the rest.** Each step runs independently; failures are collected and listed at the end (`✓ Done — N ok, M failed`), so you can fix and re-run just those.
+- The summary flags a **⚠ Reboot recommended** when a step needs one (NVIDIA driver, staged firmware).
 - Safe to **re-run** anytime — finished work is detected and skipped.
+
+Want to see exactly what it would do without touching anything? Run `./setup.sh --dry-run` — every install, swap, file edit, and `gsettings` call is printed with a `[dry-run]` prefix instead of being executed.
 
 Prefer to understand each step first, or only want some of them? The sections below are the manual equivalents.
 
@@ -120,7 +128,7 @@ Import Microsoft's repo and install via DNF (gets automatic updates, unlike the 
 
 ```bash
 sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
-sudo sh -c 'echo -e "[code]\nname=Visual Studio Code\nbaseurl=https://packages.microsoft.com/yumrepos/vscode\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc" > /etc/yum.repos.d/vscode.repo'
+sudo sh -c 'printf "%s\n" "[code]" "name=Visual Studio Code" "baseurl=https://packages.microsoft.com/yumrepos/vscode" "enabled=1" "gpgcheck=1" "gpgkey=https://packages.microsoft.com/keys/microsoft.asc" > /etc/yum.repos.d/vscode.repo'
 sudo dnf install code
 ```
 
@@ -203,9 +211,13 @@ git clone https://github.com/zsh-users/zsh-syntax-highlighting ~/.zsh/zsh-syntax
 
 ### Install Starship
 
+The quick upstream method pipes the install script straight into a shell:
+
 ```bash
 curl -sS https://starship.rs/install.sh | sh
 ```
+
+> `setup.sh` does **not** do this. Instead it downloads a pinned release tarball, verifies its SHA-256 against a hash baked into the script (failing closed on mismatch), and installs the binary to `/usr/local/bin` — avoiding trust-on-first-use in the piped installer. To bump the version, update `STARSHIP_VERSION` and the per-arch hashes near the top of `step_zsh_plugins` from the release's `*.tar.gz.sha256` sidecars.
 
 ### Wire it up in `~/.zshrc`
 
@@ -281,11 +293,11 @@ sudo dnf install \
 
 Fedora ships without patent-encumbered codecs, so out of the box you get broken or choppy video in browsers, no H.264/H.265 hardware decode, and missing formats in media players. The codecs live in RPM Fusion.
 
-Enable [RPM Fusion](#11-rpm-fusion) if you haven't, then:
+Enable [RPM Fusion](#11-rpm-fusion) if you haven't, then install the group **first** and swap in full ffmpeg **after** — the `multimedia` group can otherwise pull `ffmpeg-free` back in, leaving you with the patent-stripped build:
 
 ```bash
-sudo dnf swap ffmpeg-free ffmpeg --allowerasing
 sudo dnf group install multimedia
+sudo dnf swap ffmpeg-free ffmpeg --allowerasing
 ```
 
 Then enable hardware video decode for your GPU:
@@ -385,4 +397,23 @@ sudo reboot
 nvidia-smi                              # should show the GPU table
 lspci -k | grep -A 3 -i "vga\|3d"       # "Kernel driver in use:" should say nvidia
 lsmod | grep nvidia                     # nvidia, nvidia_modeset, nvidia_drm, nvidia_uvm
+```
+
+---
+
+## Development
+
+The script is linted in CI on every push and pull request (see [`.github/workflows/lint.yml`](.github/workflows/lint.yml)), which runs:
+
+```bash
+bash -n setup.sh      # syntax check
+shellcheck setup.sh   # static analysis
+```
+
+To run the same checks locally before committing:
+
+```bash
+bash -n setup.sh
+shellcheck setup.sh           # dnf install ShellCheck  (or: brew install shellcheck)
+./setup.sh --dry-run          # trace every action without changing anything
 ```
