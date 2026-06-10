@@ -1,18 +1,82 @@
 # Fedora Setup
 
-Post-install setup notes for Fedora Workstation (44+). Run through these top to bottom on a fresh install.
+Post-install setup notes for Fedora Workstation (44+). Run through them top to bottom on a fresh install.
+
+## Automated setup
+
+Most of this guide is scripted in [`setup.sh`](setup.sh). Run it with no arguments for an interactive picker — choose which steps to run, watch per-step progress, and get a summary of follow-up actions at the end. It's idempotent: safe to re-run; each step skips work already done. The NVIDIA step detects your GPU and only installs the driver on NVIDIA hardware.
+
+```bash
+./setup.sh            # interactive picker (all steps by default)
+./setup.sh --yes      # no prompts; run all steps
+./setup.sh --help
+```
+
+### Running it
+
+Make it executable once, then run it:
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+You'll get a numbered menu. **Press Enter to run everything**, or type a subset like `1 4 9` and press Enter to run only those steps. Then confirm with `y`:
+
+```console
+  ┌────────────────────────────────────────┐
+  │              Fedora Setup              │
+  │  post-install setup · Workstation 44+  │
+  └────────────────────────────────────────┘
+
+All steps run by default. Press Enter to run them all, or type a subset.
+
+    1  System update
+    2  Speed up DNF
+    3  Firmware updates
+    ⋮
+   12  Steam
+   13  NVIDIA driver
+
+Enter numbers (e.g. 1 4 9), or press Enter for all:        ⏎
+                                                           (Enter = all)
+About to run:
+   • System update
+   • Speed up DNF
+   ⋮
+
+Proceed? [y/N] y                                           ← type y, then Enter
+
+==> Caching sudo credentials (keeps them alive for the whole run)...
+[sudo] password for you: ••••                              ← your login password
+
+[1/13] System update
+==> ...
+```
+
+- **`⏎`** means press <kbd>Enter</kbd>. Pressing it on an empty line selects every step.
+- You're asked for your password once (for `sudo`); it's cached for the whole run.
+- Each step prints `[n/13]` progress, and a summary with any follow-up actions appears at the end.
+- Safe to **re-run** anytime — finished work is detected and skipped.
+
+Prefer to understand each step first, or only want some of them? The sections below are the manual equivalents.
 
 ## Contents
 
 1. [System update](#1-system-update)
 2. [Speed up DNF](#2-speed-up-dnf)
-3. [VS Code](#3-vs-code)
-4. [Google Chrome](#4-google-chrome)
-5. [GNOME Tweaks & Extensions](#5-gnome-tweaks--extensions)
-6. [Zsh](#6-zsh)
-7. [Zsh plugins & Starship prompt](#7-zsh-plugins--starship-prompt)
-8. [NVIDIA driver (optional)](#8-nvidia-driver-optional)
-9. [Steam](#9-steam)
+3. [Firmware updates](#3-firmware-updates)
+4. [VS Code](#4-vs-code)
+5. [Google Chrome](#5-google-chrome)
+6. [GNOME Tweaks & Extensions](#6-gnome-tweaks--extensions)
+7. [GNOME desktop tweaks](#7-gnome-desktop-tweaks)
+8. [Zsh](#8-zsh)
+9. [Zsh plugins & Starship prompt](#9-zsh-plugins--starship-prompt)
+10. [Flathub](#10-flathub)
+11. [RPM Fusion](#11-rpm-fusion)
+12. [Multimedia codecs](#12-multimedia-codecs)
+13. [Steam](#13-steam)
+14. [NVIDIA driver](#14-nvidia-driver)
 
 ---
 
@@ -39,7 +103,18 @@ max_parallel_downloads=10
 defaultyes=True
 ```
 
-## 3. VS Code
+## 3. Firmware updates
+
+Pull UEFI / SSD / peripheral firmware from [LVFS](https://fwupd.org/) and apply it (`fwupd` ships with Workstation):
+
+```bash
+sudo fwupdmgr refresh --force
+sudo fwupdmgr update
+```
+
+> Some updates only apply on the next boot — fwupd will tell you if a reboot is needed.
+
+## 4. VS Code
 
 Import Microsoft's repo and install via DNF (gets automatic updates, unlike the download):
 
@@ -51,19 +126,18 @@ sudo dnf install code
 
 > Prefer a one-liner? Download the `.rpm` from <https://code.visualstudio.com/> — but the repo method keeps it updated.
 
-## 4. Google Chrome
+## 5. Google Chrome
 
-Enable the third-party repos (Fedora prompts for this on first boot), then:
+Install Fedora's third-party repo definitions, then install Chrome — enabling its repo just for that transaction (Chrome then adds its own repo for future updates):
 
 ```bash
 sudo dnf install fedora-workstation-repositories
-sudo dnf config-manager setopt google-chrome.enabled=1
-sudo dnf install google-chrome-stable
+sudo dnf install --enablerepo=google-chrome google-chrome-stable
 ```
 
-> Or grab the `.rpm` directly from <https://www.google.com/chrome/>.
+> `--enablerepo` avoids needing the `config-manager` dnf plugin, which isn't always installed on DNF 5. Or grab the `.rpm` directly from <https://www.google.com/chrome/>.
 
-## 5. GNOME Tweaks & Extensions
+## 6. GNOME Tweaks & Extensions
 
 ```bash
 sudo dnf install gnome-tweaks gnome-extensions-app
@@ -71,7 +145,22 @@ sudo dnf install gnome-tweaks gnome-extensions-app
 
 Browse and toggle extensions at <https://extensions.gnome.org/> (install the browser connector first).
 
-## 6. Zsh
+## 7. GNOME desktop tweaks
+
+A few common preferences, set from the terminal via `gsettings` (no logout needed):
+
+```bash
+gsettings set org.gnome.desktop.peripherals.touchpad tap-to-click true
+gsettings set org.gnome.desktop.interface show-battery-percentage true
+gsettings set org.gnome.desktop.interface clock-show-weekday true
+gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled true
+gsettings set org.gnome.desktop.wm.preferences button-layout 'appmenu:minimize,maximize,close'
+gsettings set org.gnome.mutter center-new-windows true
+```
+
+> Run these inside your GNOME session (they talk to the running desktop). Adjust to taste — each line is independent.
+
+## 8. Zsh
 
 ```bash
 sudo dnf install zsh
@@ -103,7 +192,7 @@ Reload:
 source ~/.zshrc
 ```
 
-## 7. Zsh plugins & Starship prompt
+## 9. Zsh plugins & Starship prompt
 
 ### Install plugins
 
@@ -161,7 +250,74 @@ starship preset gruvbox-rainbow -o ~/.config/starship.toml
 starship preset --list
 ```
 
-## 8. NVIDIA driver (optional)
+## 10. Flathub
+
+Fedora's Flatpak remote is **filtered** by default, so many apps (Spotify, Discord, OBS, …) aren't installable until you add the full Flathub remote and drop the filter:
+
+```bash
+sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+sudo flatpak remote-modify --no-filter --enable flathub
+```
+
+Then install apps via GNOME Software or:
+
+```bash
+flatpak install flathub <app-id>
+```
+
+## 11. RPM Fusion
+
+A shared third-party repo that several steps depend on — the NVIDIA driver, multimedia codecs, and Steam all live here, not in Fedora's default repos. Enable it once:
+
+```bash
+sudo dnf install \
+  https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
+  https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+```
+
+> Already enabled? `dnf install` is a no-op on the `*-release` packages, so re-running is harmless.
+
+## 12. Multimedia codecs
+
+Fedora ships without patent-encumbered codecs, so out of the box you get broken or choppy video in browsers, no H.264/H.265 hardware decode, and missing formats in media players. The codecs live in RPM Fusion.
+
+Enable [RPM Fusion](#11-rpm-fusion) if you haven't, then:
+
+```bash
+sudo dnf swap ffmpeg-free ffmpeg --allowerasing
+sudo dnf group install multimedia
+```
+
+Then enable hardware video decode for your GPU:
+
+**NVIDIA:**
+
+```bash
+sudo dnf install libva-nvidia-driver
+```
+
+**AMD / Radeon** — Fedora's stock Mesa drivers have H.264/H.265 stripped (patents); the RPM Fusion "freeworld" builds re-enable them:
+
+```bash
+sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld
+sudo dnf swap mesa-vdpau-drivers mesa-vdpau-drivers-freeworld
+```
+
+> AMD GPUs don't need a proprietary driver — the open-source `amdgpu`/Mesa stack ships in Fedora's default repos and works out of the box. RPM Fusion is only needed here for the codec-enabled `-freeworld` drivers.
+
+## 13. Steam
+
+Enable [RPM Fusion](#11-rpm-fusion) if you haven't, then:
+
+```bash
+sudo dnf install steam
+```
+
+> GUI alternative: **Software → Enable third-party repositories → search "Steam"**.
+
+## 14. NVIDIA driver
+
+Only needed for NVIDIA GPUs — AMD/Intel use the open-source stack out of the box. The script detects this automatically and skips the driver on non-NVIDIA machines; the manual steps below are for NVIDIA hardware.
 
 ### Part 1 — Check what you have
 
@@ -199,13 +355,7 @@ sudo dnf upgrade --refresh
 
 If the kernel updated, **reboot before continuing**.
 
-**Enable RPM Fusion** (the driver lives here, not in Fedora's default repos):
-
-```bash
-sudo dnf install \
-  https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
-  https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
-```
+**Enable [RPM Fusion](#11-rpm-fusion)** if you haven't — the driver lives there.
 
 **Install the driver (and optional CUDA support):**
 
@@ -236,13 +386,3 @@ nvidia-smi                              # should show the GPU table
 lspci -k | grep -A 3 -i "vga\|3d"       # "Kernel driver in use:" should say nvidia
 lsmod | grep nvidia                     # nvidia, nvidia_modeset, nvidia_drm, nvidia_uvm
 ```
-
-## 9. Steam
-
-Enable RPM Fusion (see [Part 2](#part-2--install-the-driver) above) if you haven't, then:
-
-```bash
-sudo dnf install steam
-```
-
-> GUI alternative: **Software → Enable third-party repositories → search "Steam"**.
