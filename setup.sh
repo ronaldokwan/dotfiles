@@ -121,7 +121,7 @@ step_dnf_speedup() {
   local conf=/etc/dnf/dnf.conf
   for kv in "max_parallel_downloads=10" "defaultyes=True"; do
     local key="${kv%%=*}"
-    if sudo grep -qE "^${key}=" "$conf"; then
+    if sudo grep -q "^${key}=" "$conf"; then
       skip "$key already set in $conf"
     else
       echo "$kv" | sudo tee -a "$conf" >/dev/null
@@ -162,15 +162,22 @@ step_gnome() {
 step_zsh() {
   dnf_install zsh
 
-  local zsh_path; zsh_path="$(command -v zsh)"
-  if [ "${SHELL:-}" = "$zsh_path" ]; then
+  local zsh_path login_shell
+  zsh_path="$(command -v zsh)"
+  # Read the login shell from /etc/passwd, not $SHELL — $SHELL reflects the
+  # shell that started this session, which may differ from the account default.
+  login_shell="$(getent passwd "$USER" | cut -d: -f7)"
+  if [ "$login_shell" = "$zsh_path" ]; then
     skip "zsh is already the default shell"
   else
-    info "setting zsh as default shell (you may be prompted for your password)"
-    if chsh -s "$zsh_path"; then
+    # Run chsh via cached sudo with an explicit target user: a plain `chsh`
+    # authenticates the calling user through PAM, which blocks an unattended
+    # (--yes) run. Going through sudo reuses the credentials cached in main().
+    info "setting zsh as default shell"
+    if sudo chsh -s "$zsh_path" "$USER"; then
       add_note "Log out and back in for zsh to become your default shell."
     else
-      warn "chsh failed — set it manually with: chsh -s $zsh_path"
+      warn "chsh failed — set it manually with: sudo chsh -s $zsh_path $USER"
     fi
   fi
 
@@ -197,8 +204,22 @@ step_zsh_plugins() {
   if command -v starship >/dev/null 2>&1; then
     skip "starship already installed"
   else
+    # NOTE: this pipes the upstream installer straight into a shell. HTTPS
+    # protects the transport, but there is no checksum/signature check — you
+    # are trusting starship.rs and its CDN. This is the project's documented
+    # install method (same model as Homebrew / Oh My Zsh). To harden it, pin a
+    # release and verify its SHA-256 before running.
     info "installing starship"
-    curl -sS https://starship.rs/install.sh | sh -s -- --yes
+    # Download the whole installer before running it: -f makes curl fail on an
+    # HTTP error (otherwise a 5xx error page would pipe into sh with exit 0),
+    # and capturing first means a truncated/interrupted download never reaches
+    # the shell half-executed.
+    local installer
+    if installer="$(curl -fsSL --connect-timeout 10 --max-time 60 https://starship.rs/install.sh)"; then
+      printf '%s' "$installer" | sh -s -- --yes
+    else
+      err "failed to download starship installer"; return 1
+    fi
   fi
 
   # Wire up ~/.zshrc — order matters: autosuggestions, then highlighting, then starship.
@@ -226,7 +247,16 @@ step_nvidia() {
   sudo dnf upgrade --refresh -y
 
   ensure_rpmfusion
-  dnf_install akmod-nvidia xorg-x11-drv-nvidia-cuda
+  dnf_install akmod-nvidia
+
+  # CUDA is a large optional dependency (enables nvidia-smi / compute). Default
+  # to installing it so unattended (--yes) runs keep their previous behaviour,
+  # but let an interactive user opt out.
+  if ask "Also install CUDA support (xorg-x11-drv-nvidia-cuda, ~large download)?" 1; then
+    dnf_install xorg-x11-drv-nvidia-cuda
+  else
+    skip "CUDA packages not installed"
+  fi
 
   warn "akmod is building the kernel module in the background (~5 min)."
   add_note "NVIDIA: wait for the module to build ('modinfo -F version nvidia' prints a version), then reboot and check 'nvidia-smi'."
@@ -236,8 +266,12 @@ step_codecs() {
   # Fedora ships without patent-encumbered codecs — needed for video playback
   # and hardware decode. Lives in RPM Fusion.
   ensure_rpmfusion
-  info "swapping in full ffmpeg"
-  sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing || skip "ffmpeg already in place (nothing to swap)"
+  if pkg_installed ffmpeg-free; then
+    info "swapping in full ffmpeg"
+    sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing
+  else
+    skip "ffmpeg-free not present — full ffmpeg already in place"
+  fi
   info "installing multimedia group"
   sudo dnf group install -y multimedia
 
@@ -249,9 +283,18 @@ step_codecs() {
   if grep -qiE 'amd|ati|radeon' <<<"$gpus"; then
     # Fedora's stock mesa drivers have H.264/H.265 stripped (patents);
     # the RPM Fusion "freeworld" builds re-enable them.
-    info "swapping in mesa freeworld drivers (AMD hardware decode)"
-    sudo dnf swap -y mesa-va-drivers    mesa-va-drivers-freeworld    || skip "mesa-va-drivers already freeworld"
-    sudo dnf swap -y mesa-vdpau-drivers mesa-vdpau-drivers-freeworld || skip "mesa-vdpau-drivers already freeworld"
+    if pkg_installed mesa-va-drivers; then
+      info "swapping in mesa-va freeworld driver (AMD hardware decode)"
+      sudo dnf swap -y mesa-va-drivers mesa-va-drivers-freeworld
+    else
+      skip "mesa-va-drivers already freeworld"
+    fi
+    if pkg_installed mesa-vdpau-drivers; then
+      info "swapping in mesa-vdpau freeworld driver"
+      sudo dnf swap -y mesa-vdpau-drivers mesa-vdpau-drivers-freeworld
+    else
+      skip "mesa-vdpau-drivers already freeworld"
+    fi
   fi
 }
 
@@ -262,10 +305,25 @@ step_steam() {
 
 step_firmware() {
   dnf_install fwupd
+  # fwupdmgr exit codes: 0 = success, 2 = nothing to do, anything else = real error.
+  local rc
+
   info "refreshing firmware metadata from LVFS"
-  sudo fwupdmgr refresh --force || true
+  rc=0; sudo fwupdmgr refresh --force || rc=$?
+  case "$rc" in
+    0) ok "metadata refreshed" ;;
+    2) skip "metadata already up to date" ;;
+    *) err "fwupdmgr refresh failed (exit $rc)"; return "$rc" ;;
+  esac
+
   info "applying firmware updates (if any)"
-  sudo fwupdmgr update -y || skip "no firmware updates to apply"
+  rc=0; sudo fwupdmgr update -y || rc=$?
+  case "$rc" in
+    0) ok "firmware updates applied" ;;
+    2) skip "no firmware updates to apply" ;;
+    *) err "fwupdmgr update failed (exit $rc)"; return "$rc" ;;
+  esac
+
   add_note "Some firmware updates only take effect after a reboot — fwupd will say if so."
 }
 
@@ -278,7 +336,12 @@ step_gnome_tweaks() {
     return
   fi
   gset() {  # schema key value
-    if gsettings set "$1" "$2" "$3" 2>/dev/null; then ok "$2 → $3"; else warn "couldn't set $1 $2"; fi
+    local err
+    if err="$(gsettings set "$1" "$2" "$3" 2>&1)"; then
+      ok "$2 → $3"
+    else
+      warn "couldn't set $1 $2: $err"
+    fi
   }
   gset org.gnome.desktop.peripherals.touchpad tap-to-click true
   gset org.gnome.desktop.interface           show-battery-percentage true
@@ -305,9 +368,28 @@ step_flathub() {
 # Parallel arrays: key | label | function. Every step runs by default; steps
 # that don't apply to this machine (e.g. NVIDIA) detect that and skip themselves.
 
-STEP_KEYS=(   update             dnf               firmware       vscode       chrome          gnome                        gnometweaks            zsh        plugins                   flathub       codecs                steam         nvidia )
+STEP_KEYS=(   update             dnf               firmware       vscode       chrome          gnome                        gnome-tweaks           zsh        plugins                   flathub       codecs                steam         nvidia )
 STEP_LABELS=( "System update"    "Speed up DNF"    "Firmware updates" "VS Code" "Google Chrome" "GNOME Tweaks & Extensions" "GNOME desktop tweaks" "Zsh"      "Zsh plugins & Starship"  "Flathub"     "Multimedia codecs"   "Steam"       "NVIDIA driver" )
 STEP_FUNCS=(  step_system_update step_dnf_speedup  step_firmware  step_vscode  step_chrome     step_gnome                  step_gnome_tweaks      step_zsh   step_zsh_plugins          step_flathub  step_codecs           step_steam    step_nvidia )
+
+# Resolve a step key (e.g. "vscode") to its array index. Echoes the index and
+# returns 0 on match; returns 1 if the key is unknown.
+key_to_index() {
+  local k="$1" i
+  for i in "${!STEP_KEYS[@]}"; do
+    [ "${STEP_KEYS[$i]}" = "$k" ] && { printf '%s' "$i"; return 0; }
+  done
+  return 1
+}
+
+# Drop duplicate indices from SELECTED, preserving first-seen order.
+dedup_selected() {
+  local seen=() out=() i
+  for i in "${SELECTED[@]}"; do
+    if [ -z "${seen[$i]:-}" ]; then seen[$i]=1; out+=("$i"); fi
+  done
+  SELECTED=("${out[@]}")
+}
 
 # ---- interactive picker ----------------------------------------------------
 
@@ -339,6 +421,7 @@ prompt_menu() {
         warn "ignoring invalid choice: $tok"
       fi
     done
+    dedup_selected
   fi
 }
 
@@ -396,9 +479,10 @@ usage() {
 Fedora Workstation post-install setup.
 
 Usage:
-  ./setup.sh            Interactive picker (runs all steps if non-interactive)
-  ./setup.sh --yes      Skip all prompts; run all steps
-  ./setup.sh --help     Show this help
+  ./setup.sh                 Interactive picker (runs all steps if non-interactive)
+  ./setup.sh --yes           Skip all prompts; run all steps
+  ./setup.sh vscode chrome   Run only the named steps
+  ./setup.sh --help          Show this help
 
 Steps: update, dnf, firmware, vscode, chrome, gnome, gnome-tweaks, zsh,
        plugins, flathub, codecs, steam, nvidia (auto-skips if no NVIDIA GPU)
@@ -407,14 +491,25 @@ EOF
 }
 
 main() {
+  # Must run as the target user, not root: this script calls sudo itself for
+  # the system steps, while the per-user steps (~/.zshrc, ~/.zsh clones,
+  # gsettings, chsh) must land in the real user's account. Running the whole
+  # thing under sudo would write them to /root instead.
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    err "Don't run this script as root or with sudo — it calls sudo itself when needed."
+    exit 1
+  fi
+
   INTERACTIVE=1; [ -t 0 ] || INTERACTIVE=0
   ASSUME_YES=0
 
+  local cli_steps=()
   for arg in "$@"; do
     case "$arg" in
       -y|--yes)  ASSUME_YES=1 ;;
       -h|--help) usage; exit 0 ;;
-      *) err "unknown option: $arg"; usage; exit 1 ;;
+      -*) err "unknown option: $arg"; usage; exit 1 ;;
+      *) cli_steps+=("$arg") ;;
     esac
   done
 
@@ -425,8 +520,20 @@ main() {
     warn "This doesn't look like Fedora. Continuing anyway, but commands may fail."
   fi
 
+  # Step names on the command line take precedence over the picker.
+  if [ ${#cli_steps[@]} -gt 0 ]; then
+    SELECTED=()
+    local s idx
+    for s in "${cli_steps[@]}"; do
+      if idx="$(key_to_index "$s")"; then
+        SELECTED+=("$idx")
+      else
+        err "unknown step: $s"; usage; exit 1
+      fi
+    done
+    dedup_selected
   # Interactive picker unless --yes or not a terminal; otherwise run everything.
-  if [ "$INTERACTIVE" -eq 1 ] && [ "$ASSUME_YES" -eq 0 ]; then
+  elif [ "$INTERACTIVE" -eq 1 ] && [ "$ASSUME_YES" -eq 0 ]; then
     prompt_menu
   else
     select_all
@@ -442,7 +549,12 @@ main() {
   info "Caching sudo credentials (keeps them alive for the whole run)..."
   sudo -v
   # Background keep-alive so long installs don't stall on a sudo prompt.
-  ( while kill -0 "$$" 2>/dev/null; do sudo -n true; sleep 50; done ) &
+  # Guard sudo -n true: on failure (expired creds, PAM policy) warn and stop
+  # rather than letting the inherited set -e silently kill the loop.
+  ( while kill -0 "$$" 2>/dev/null; do
+      sudo -n true 2>/dev/null || { warn "sudo keep-alive failed — you may be prompted again"; break; }
+      sleep 50
+    done ) &
   SUDO_PID=$!
 
   run_selected
