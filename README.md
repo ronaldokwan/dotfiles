@@ -7,10 +7,7 @@ Post-install setup notes for Fedora Workstation (44+). Run through them top to b
 Clone the repo and `cd` into it (install `git` first if a fresh system doesn't have it):
 
 ```bash
-sudo dnf install -y git
-git clone https://github.com/ronaldokwan/dotfiles.git
-cd dotfiles
-./setup.sh
+sudo dnf install -y git && git clone https://github.com/ronaldokwan/dotfiles.git && cd dotfiles && ./setup.sh
 ```
 
 ## Automated setup
