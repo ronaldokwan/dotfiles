@@ -1,74 +1,27 @@
 # Fedora Setup
 
-Post-install setup notes for Fedora Workstation (44+). Run through them top to bottom on a fresh install.
+A post-install setup guide for **Fedora Workstation 44+** that takes a fresh install from boot to a complete daily-driver environment: system updates, essential applications (VS Code, Chrome, Steam), a Zsh + Starship shell, GNOME tweaks, multimedia codecs, and the NVIDIA driver.
 
-## Get the files
+Every step is a plain `dnf` or `gsettings` command that can be reviewed before it is run.
 
-Clone the repo and `cd` into it (install `git` first if a fresh system doesn't have it):
+## Prerequisites
+
+- Fedora Workstation 44 or newer
+- A user account with `sudo` privileges
+- An active internet connection
+
+## Installation
+
+Install `git` if it is not already present, then clone the repository and change into it:
 
 ```bash
-sudo dnf install -y git && git clone https://github.com/ronaldokwan/dotfiles.git && cd dotfiles && ./setup.sh
+sudo dnf install -y git && git clone https://github.com/ronaldokwan/dotfiles.git && cd dotfiles
 ```
 
-## Automated setup
+Work through the sections below in order. Each section is self-contained, so any that do not apply may be skipped.
 
-Most of this guide is scripted in [`setup.sh`](setup.sh). Run it with no arguments for an interactive picker — choose which steps to run, watch per-step progress, and get a summary of follow-up actions at the end. It's idempotent: safe to re-run; each step skips work already done. The NVIDIA step detects your GPU and only installs the driver on NVIDIA hardware.
-
-```bash
-./setup.sh                 # interactive picker (all steps by default)
-./setup.sh --yes           # no prompts; run all steps
-./setup.sh vscode chrome   # run only the named steps
-./setup.sh --dry-run       # print every change without making it
-./setup.sh --help
-```
-
-Run it as your normal user — **not** with `sudo`. The script calls `sudo` itself only for the steps that need root, so the per-user changes (your `~/.zshrc`, shell, GNOME settings) land in your account rather than root's. Available step names: `update`, `dnf`, `firmware`, `vscode`, `chrome`, `gnome`, `gnome-tweaks`, `zsh`, `plugins`, `flathub`, `codecs`, `steam`, `nvidia`.
-
-### Running it
-
-Running `./setup.sh` (as shown above) gives you a numbered menu. **Press Enter to run everything**, or type a subset like `1 4 9` and press Enter to run only those steps. Then confirm with `y`:
-
-```console
-  ┌────────────────────────────────────────┐
-  │              Fedora Setup              │
-  │  post-install setup · Workstation 44+  │
-  └────────────────────────────────────────┘
-
-All steps run by default. Press Enter to run them all, or type a subset.
-
-    1  System update
-    2  Speed up DNF
-    3  Firmware updates
-    ⋮
-   12  Steam
-   13  NVIDIA driver
-
-Enter numbers (e.g. 1 4 9), or press Enter for all:        ⏎
-                                                           (Enter = all)
-About to run:
-   • System update
-   • Speed up DNF
-   ⋮
-
-Proceed? [y/N] y                                           ← type y, then Enter
-
-==> Caching sudo credentials (keeps them alive for the whole run)...
-[sudo] password for you: ••••                              ← your login password
-
-[1/13] System update
-==> ...
-```
-
-- **`⏎`** means press <kbd>Enter</kbd>. Pressing it on an empty line selects every step.
-- You're asked for your password once (for `sudo`); it's cached for the whole run.
-- Each step prints `[n/13]` progress, and a summary with any follow-up actions appears at the end.
-- **One failing step doesn't stop the rest.** Each step runs independently; failures are collected and listed at the end (`✓ Done — N ok, M failed`), so you can fix and re-run just those.
-- The summary flags a **⚠ Reboot recommended** when a step needs one (NVIDIA driver, staged firmware).
-- Safe to **re-run** anytime — finished work is detected and skipped.
-
-Want to see exactly what it would do without touching anything? Run `./setup.sh --dry-run` — every install, swap, file edit, and `gsettings` call is printed with a `[dry-run]` prefix instead of being executed.
-
-Prefer to understand each step first, or only want some of them? The sections below are the manual equivalents.
+> [!NOTE]
+> Run these commands as your normal user. `sudo` is shown explicitly on the steps that require root, so per-user changes — `~/.zshrc`, your default shell, and GNOME settings — apply to your account rather than root's.
 
 ## Contents
 
@@ -82,7 +35,7 @@ Prefer to understand each step first, or only want some of them? The sections be
 8. [Zsh](#8-zsh)
 9. [Zsh plugins & Starship prompt](#9-zsh-plugins--starship-prompt)
 10. [Flathub](#10-flathub)
-11. [RPM Fusion](#11-rpm-fusion)
+11. [RPM Fusion](#11-rpm-fusion) — required for 12–14
 12. [Multimedia codecs](#12-multimedia-codecs)
 13. [Steam](#13-steam)
 14. [NVIDIA driver](#14-nvidia-driver)
@@ -95,22 +48,34 @@ Prefer to understand each step first, or only want some of them? The sections be
 sudo dnf upgrade --refresh
 ```
 
+> [!NOTE]
 > `upgrade` is the modern DNF 5 verb (`update` still works as an alias). Reboot if the kernel was updated.
 
 ## 2. Speed up DNF
 
-Enable parallel downloads and default-yes prompts:
+DNF downloads packages **3 at a time** by default and isn't set in Fedora's stock config. Raising the limit speeds up large transactions. Check the value DNF actually uses:
+
+```bash
+# DNF 4 (Fedora ≤ 40)
+python3 -c "import dnf; print(dnf.Base().conf.max_parallel_downloads)"
+
+# DNF 5 (Fedora 41+)
+dnf config-manager --dump 2>/dev/null | grep max_parallel_downloads
+```
+
+If it reports `3` (the default), bump it. Edit the config and add the lines if they aren't already there (`defaultyes` auto-confirms install prompts):
 
 ```bash
 sudo nano /etc/dnf/dnf.conf
 ```
 
-Add:
-
 ```ini
 max_parallel_downloads=10
 defaultyes=True
 ```
+
+> [!NOTE]
+> Leave `defaultyes=True` out if you'd rather confirm each transaction manually — it makes `dnf` proceed without the `[y/N]` prompt.
 
 ## 3. Firmware updates
 
@@ -121,6 +86,7 @@ sudo fwupdmgr refresh --force
 sudo fwupdmgr update
 ```
 
+> [!NOTE]
 > Some updates only apply on the next boot — fwupd will tell you if a reboot is needed.
 
 ## 4. VS Code
@@ -133,7 +99,14 @@ sudo sh -c 'printf "%s\n" "[code]" "name=Visual Studio Code" "baseurl=https://pa
 sudo dnf install code
 ```
 
-> Prefer a one-liner? Download the `.rpm` from <https://code.visualstudio.com/> — but the repo method keeps it updated.
+Verify:
+
+```bash
+code --version
+```
+
+> [!TIP]
+> Alternatively, download the `.rpm` from <https://code.visualstudio.com/>. The repository method above is preferred, as it receives automatic updates.
 
 ## 5. Google Chrome
 
@@ -144,6 +117,13 @@ sudo dnf install fedora-workstation-repositories
 sudo dnf install --enablerepo=google-chrome google-chrome-stable
 ```
 
+Verify:
+
+```bash
+google-chrome --version
+```
+
+> [!NOTE]
 > `--enablerepo` avoids needing the `config-manager` dnf plugin, which isn't always installed on DNF 5. Or grab the `.rpm` directly from <https://www.google.com/chrome/>.
 
 ## 6. GNOME Tweaks & Extensions
@@ -167,6 +147,7 @@ gsettings set org.gnome.desktop.wm.preferences button-layout 'appmenu:minimize,m
 gsettings set org.gnome.mutter center-new-windows true
 ```
 
+> [!NOTE]
 > Run these inside your GNOME session (they talk to the running desktop). Adjust to taste — each line is independent.
 
 ## 8. Zsh
@@ -181,7 +162,13 @@ Make it your default shell:
 chsh -s "$(which zsh)"
 ```
 
-Log out and back in. On first launch, zsh creates `~/.zshrc`.
+Log out and back in, then confirm the change took effect:
+
+```bash
+echo $SHELL        # should print /usr/bin/zsh
+```
+
+On first launch, zsh creates `~/.zshrc`.
 
 ### Aliases
 
@@ -218,7 +205,8 @@ The quick upstream method pipes the install script straight into a shell:
 curl -sS https://starship.rs/install.sh | sh
 ```
 
-> `setup.sh` does **not** do this. Instead it downloads a pinned release tarball, verifies its SHA-256 against a hash baked into the script (failing closed on mismatch), and installs the binary to `/usr/local/bin` — avoiding trust-on-first-use in the piped installer. To bump the version, update `STARSHIP_VERSION` and the per-arch hashes near the top of `step_zsh_plugins` from the release's `*.tar.gz.sha256` sidecars.
+> [!WARNING]
+> Piping a remote script into a shell is trust-on-first-use. If you'd rather not, download a pinned release tarball from the [Starship releases page](https://github.com/starship/starship/releases), verify its SHA-256 against the published `*.tar.gz.sha256` sidecar, and install the binary to `/usr/local/bin` yourself.
 
 ### Wire it up in `~/.zshrc`
 
@@ -280,6 +268,9 @@ flatpak install flathub <app-id>
 
 ## 11. RPM Fusion
 
+> [!IMPORTANT]
+> The next three steps — **Multimedia codecs (12)**, **Steam (13)**, and **NVIDIA driver (14)** — all install from RPM Fusion. Enable it here first, then continue top to bottom.
+
 A shared third-party repo that several steps depend on — the NVIDIA driver, multimedia codecs, and Steam all live here, not in Fedora's default repos. Enable it once:
 
 ```bash
@@ -288,7 +279,8 @@ sudo dnf install \
   https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
 ```
 
-> Already enabled? `dnf install` is a no-op on the `*-release` packages, so re-running is harmless.
+> [!NOTE]
+> Re-running is safe: `dnf install` is a no-op on the `*-release` packages when they are already installed.
 
 ## 12. Multimedia codecs
 
@@ -316,6 +308,7 @@ sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld
 sudo dnf swap mesa-vdpau-drivers mesa-vdpau-drivers-freeworld
 ```
 
+> [!NOTE]
 > AMD GPUs don't need a proprietary driver — the open-source `amdgpu`/Mesa stack ships in Fedora's default repos and works out of the box. RPM Fusion is only needed here for the codec-enabled `-freeworld` drivers.
 
 ## 13. Steam
@@ -326,11 +319,12 @@ Enable [RPM Fusion](#11-rpm-fusion) if you haven't, then:
 sudo dnf install steam
 ```
 
+> [!TIP]
 > GUI alternative: **Software → Enable third-party repositories → search "Steam"**.
 
 ## 14. NVIDIA driver
 
-Only needed for NVIDIA GPUs — AMD/Intel use the open-source stack out of the box. The script detects this automatically and skips the driver on non-NVIDIA machines; the manual steps below are for NVIDIA hardware.
+Only needed for NVIDIA GPUs — AMD/Intel use the open-source stack out of the box. The steps below are for NVIDIA hardware.
 
 ### Part 1 — Check what you have
 
@@ -377,7 +371,7 @@ sudo dnf install akmod-nvidia
 sudo dnf install xorg-x11-drv-nvidia-cuda   # optional: CUDA / nvidia-smi
 ```
 
-**Wait for the kernel module to build** ⚠️ — `akmod` builds it in the background (~5 min). Check progress:
+**Wait for the kernel module to build** — `akmod` builds it in the background (~5 min). Check progress:
 
 ```bash
 modinfo -F version nvidia
@@ -385,6 +379,9 @@ modinfo -F version nvidia
 
 - Prints a version (e.g. `560.35.03`) → build finished ✅
 - Errors out → not done yet, wait longer.
+
+> [!IMPORTANT]
+> Don't reboot until `modinfo` prints a version — rebooting mid-build can drop you to a black screen with no working driver.
 
 **Reboot:**
 
@@ -402,19 +399,21 @@ lsmod | grep nvidia                     # nvidia, nvidia_modeset, nvidia_drm, nv
 
 ---
 
-## Development
+## Finishing up
 
-The script is linted in CI on every push and pull request (see [`.github/workflows/lint.yml`](.github/workflows/lint.yml)), which runs:
+That's the full setup. A few steps need a reboot to fully take effect — do a final reboot if you ran any of them:
 
-```bash
-bash -n setup.sh      # syntax check
-shellcheck setup.sh   # static analysis
-```
-
-To run the same checks locally before committing:
+- **System update (1)** — if a new kernel was installed
+- **Firmware updates (3)** — staged updates apply during boot
+- **Zsh (8)** — log out and back in for the default-shell change
+- **NVIDIA driver (14)** — required after the module builds
 
 ```bash
-bash -n setup.sh
-shellcheck setup.sh           # dnf install ShellCheck  (or: brew install shellcheck)
-./setup.sh --dry-run          # trace every action without changing anything
+sudo reboot
 ```
+
+After rebooting, you should have a fully updated system with your applications, shell, and drivers in place.
+
+## License
+
+Released under the [MIT License](LICENSE).
